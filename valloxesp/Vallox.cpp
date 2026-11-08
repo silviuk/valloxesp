@@ -129,6 +129,11 @@ void Vallox::loop() {
     }
   }
 
+  // Fallback if no status reply arrives: release the lock after a short
+  // timeout instead of waiting for the 5 s retry loop.
+  if (statusMutex && now - statusMutexAt > STATUS_LOCK_TIMEOUT) {
+    statusMutex = false;
+  }
   if (now - lastRetryLoop > RETRY_INTERVAL) {
     lastRetryLoop = now;
     retryLoop();
@@ -230,8 +235,11 @@ void Vallox::setHeatingModeOff() {
 boolean Vallox::setStatusVariable(byte variable, byte value) {
   if (!statusMutex) {
     statusMutex = true; // lock sending status again
+    statusMutexAt = millis();
     // Status is only allowed to send to specific mainboard
     setVariable(variable, value, VX_MSG_MAINBOARD_1);
+    // Ask for the resulting status so the reply clears the lock promptly.
+    requestVariable(VX_VARIABLE_STATUS);
 
     // Clear the retry loop to prevent retry loops to break in before getting reply
     lastRetryLoop = millis();
@@ -303,19 +311,23 @@ unsigned long Vallox::getUpdated() {
 }
 
 int Vallox::getInsideTemp() {
-  return data.t_inside.value;
+  // NOT_SET until a real reading arrives (never publish placeholders).
+  return data.t_inside.lastReceived ? data.t_inside.value : NOT_SET;
 }
 
 int Vallox::getOutsideTemp() {
-  return data.t_outside.value;
+  // NOT_SET until a real reading arrives (never publish placeholders).
+  return data.t_outside.lastReceived ? data.t_outside.value : NOT_SET;
 }
 
 int Vallox::getIncomingTemp() {
-  return data.t_incoming.value;
+  // NOT_SET until a real reading arrives (never publish placeholders).
+  return data.t_incoming.lastReceived ? data.t_incoming.value : NOT_SET;
 }
 
 int Vallox::getExhaustTemp() {
-  return data.t_exhaust.value;
+  // NOT_SET until a real reading arrives (never publish placeholders).
+  return data.t_exhaust.lastReceived ? data.t_exhaust.value : NOT_SET;
 }
 
 boolean Vallox::isOn() {
@@ -516,16 +528,44 @@ void Vallox::requestVariable(byte variable) {
   if (requestCount < REQUEST_QUEUE_LENGTH) requestQueue[requestCount++] = variable;
 }
 
+int Vallox::extraIndex(byte variable) {
+  for (byte i = 0; i < EXTRA_REGISTER_COUNT; ++i) {
+    if (extraRegisters[i] == variable) return i;
+  }
+  return -1;
+}
+
+void Vallox::noteRequestTimeout(byte variable, unsigned long now) {
+  int i = extraIndex(variable);
+  if (i < 0) return; // core registers keep their existing retry behaviour
+  if (extraMisses[i] < 255) ++extraMisses[i];
+  if (extraMisses[i] >= EXTRA_MAX_MISSES) extraBackoffAt[i] = now;
+}
+
+boolean Vallox::isBackedOff(byte variable, unsigned long now) {
+  int i = extraIndex(variable);
+  if (i < 0 || extraMisses[i] < EXTRA_MAX_MISSES) return false;
+  // Unanswered N times in a row: probe only once per backoff period.
+  if (now - extraBackoffAt[i] < EXTRA_BACKOFF_INTERVAL) return true;
+  extraBackoffAt[i] = now;
+  return false;
+}
+
 void Vallox::processRequestQueue() {
   unsigned long now = millis();
   // A missing response releases the slot after the existing retry interval.
   // Optional registers retry on their normal 60 s / 5 min schedule.
-  if (pendingRequest && now - requestSentAt < RETRY_INTERVAL) return;
-  pendingRequest = 0;
+  if (pendingRequest && now - requestSentAt < REQUEST_TIMEOUT) return;
+  if (pendingRequest) {
+    // Timed out: count consecutive misses for optional registers.
+    noteRequestTimeout(pendingRequest, now);
+    pendingRequest = 0;
+  }
   if (!requestCount || now - requestSentAt < REQUEST_GAP) return;
   byte variable = requestQueue[0];
   for (byte i = 1; i < requestCount; ++i) requestQueue[i - 1] = requestQueue[i];
   --requestCount;
+  if (isBackedOff(variable, now)) return; // skip unanswered register for now
   pendingRequest = variable;
   requestSentAt = now;
   byte message[VX_MSG_LENGTH];
@@ -601,6 +641,9 @@ void Vallox::decodeMessage(const byte message[]) {
   if (message[1] == VX_MSG_MAINBOARD_1 &&
       message[2] == VX_MSG_THIS_PANEL && variable == pendingRequest) {
     pendingRequest = 0;
+  }
+  for (byte i = 0; i < EXTRA_REGISTER_COUNT; ++i) {
+    if (extraRegisters[i] == variable) extraMisses[i] = 0; // answered: supported
   }
 
   for (byte i = 0; i < EXTRA_REGISTER_COUNT; ++i) {

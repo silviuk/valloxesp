@@ -17,6 +17,10 @@
 #define REQUEST_GAP 100 // minimum time between poll frames, in ms
 #define REQUEST_QUEUE_LENGTH 24
 #define EXTRA_REGISTER_COUNT 9
+#define REQUEST_TIMEOUT 2000 // ms to wait for a poll reply before freeing the slot
+#define STATUS_LOCK_TIMEOUT 1500 // ms; status reply normally clears the lock sooner
+#define EXTRA_MAX_MISSES 3 // consecutive unanswered polls before backing off
+#define EXTRA_BACKOFF_INTERVAL 3600000UL // probe unanswered registers hourly
 
 // senders and receivers
 #define VX_MSG_MAINBOARD_1 0x11
@@ -141,6 +145,9 @@ class Vallox {
     byte requestCount = 0;
     byte pendingRequest = 0;
     unsigned long requestSentAt = 0;
+    unsigned long statusMutexAt = 0;
+    byte extraMisses[EXTRA_REGISTER_COUNT] = {};
+    unsigned long extraBackoffAt[EXTRA_REGISTER_COUNT] = {};
     int extraValues[EXTRA_REGISTER_COUNT] = {
       NOT_SET, NOT_SET, NOT_SET, NOT_SET, NOT_SET,
       NOT_SET, NOT_SET, NOT_SET, NOT_SET
@@ -246,6 +253,9 @@ class Vallox {
     // generic request
     void requestVariable(byte variable);
     void processRequestQueue();
+    int extraIndex(byte variable);
+    void noteRequestTimeout(byte variable, unsigned long now);
+    boolean isBackedOff(byte variable, unsigned long now);
     void requestLiveRegisters();
     void requestSettingRegisters();
 

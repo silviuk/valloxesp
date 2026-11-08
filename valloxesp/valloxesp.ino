@@ -244,10 +244,11 @@ void publishState() {
 void publishTemperatures() {
   DynamicJsonDocument root(JSON_BUFFER_LENGTH);
 
-  root["temp_outside"] = vx.getOutsideTemp();
-  root["temp_inside"] = vx.getInsideTemp();
-  root["temp_incoming"] = vx.getIncomingTemp();
-  root["temp_exhaust"] = vx.getExhaustTemp();
+  // Omit temperatures that have not been read yet (no -999 placeholders).
+  if (vx.getOutsideTemp() != NOT_SET) root["temp_outside"] = vx.getOutsideTemp();
+  if (vx.getInsideTemp() != NOT_SET) root["temp_inside"] = vx.getInsideTemp();
+  if (vx.getIncomingTemp() != NOT_SET) root["temp_incoming"] = vx.getIncomingTemp();
+  if (vx.getExhaustTemp() != NOT_SET) root["temp_exhaust"] = vx.getExhaustTemp();
 
   // Publish only if RH values are something else than not set
   if(vx.getRh1() != NOT_SET) {

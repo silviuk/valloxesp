@@ -97,7 +97,11 @@ class ValloxDigitAttributedSensor(ValloxDigitSensor):
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        return self._vallox2mqtt._attrs.get(self._attr_name)
+        value = self._vallox2mqtt._attrs.get(self._attr_name)
+        # Firmware placeholder for "not read yet" (-999); never record it.
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value <= -999:
+            return None
+        return value
 
     @property
     def native_unit_of_measurement(self):
@@ -106,7 +110,10 @@ class ValloxDigitAttributedSensor(ValloxDigitSensor):
     @property
     def available(self) -> bool:
         if self._attr_name in self._vallox2mqtt._attrs:
-          return self._vallox2mqtt._attrs[self._attr_name] is not None
+          value = self._vallox2mqtt._attrs[self._attr_name]
+          if isinstance(value, (int, float)) and not isinstance(value, bool) and value <= -999:
+            return False
+          return value is not None
         else:
           return False
 
