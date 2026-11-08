@@ -18,7 +18,9 @@
 #define REQUEST_QUEUE_LENGTH 24
 #define EXTRA_REGISTER_COUNT 9
 #define REQUEST_TIMEOUT 2000 // ms to wait for a poll reply before freeing the slot
-#define STATUS_LOCK_TIMEOUT 1500 // ms; status reply normally clears the lock sooner
+#define STATUS_LOCK_TIMEOUT 5000 // allows one in-flight poll plus the status poll
+#define WRITE_REPLY_WAIT_MS 300 // wait this long for an outstanding poll reply before writing
+#define WRITE_DEFER_MAX_MS 500 // send a deferred command at the latest after this
 #define EXTRA_MAX_MISSES 3 // consecutive unanswered polls before backing off
 #define EXTRA_BACKOFF_INTERVAL 3600000UL // probe unanswered registers hourly
 
@@ -136,6 +138,8 @@ class Vallox {
 
     // Init is done completely and marked ready -> ready to send updates
     bool fullInitDone = false;
+    bool statusDirty = false;
+    bool temperatureDirty = false;
 
     unsigned long lastRequested = 0;
     unsigned long lastRetryLoop = 0;
@@ -146,6 +150,12 @@ class Vallox {
     byte pendingRequest = 0;
     unsigned long requestSentAt = 0;
     unsigned long statusMutexAt = 0;
+    unsigned long lastBusActivity = 0;
+    bool deferredWrite = false;
+    byte deferredVariable = 0, deferredValue = 0, deferredTarget = 0;
+    unsigned long deferredAt = 0;
+    byte receiveBuffer[VX_MSG_LENGTH] = {};
+    byte receiveCount = 0;
     byte extraMisses[EXTRA_REGISTER_COUNT] = {};
     unsigned long extraBackoffAt[EXTRA_REGISTER_COUNT] = {};
     int extraValues[EXTRA_REGISTER_COUNT] = {
@@ -227,8 +237,11 @@ class Vallox {
     boolean setStatusVariable(byte variable, byte value);
 
     // generic setter
-    void setVariable(byte variable, byte value, byte target);
-    void setVariable(byte variable, byte value);
+    bool setVariable(byte variable, byte value, byte target);
+    bool setVariable(byte variable, byte value);
+    void transmitVariable(byte variable, byte value, byte target);
+    boolean isBusBusy();
+    void processDeferredWrite();
   
     // requests
     void sendStatusReq();

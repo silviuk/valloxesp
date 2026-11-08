@@ -46,11 +46,11 @@ the added fields without depending on PubSubClient's packet buffer size.
 | `fault_code` | 0x36, raw decimal | Fault Code sensor, no unit or measurement state class |
 | `boost_remaining` | 0x79, raw minutes | Boost Remaining duration sensor, min, measurement |
 | `post_heating_target` | 0x57, NTC table | Post Heating Target temperature sensor, °C, measurement |
-| `bypass_setpoint` | 0xAF, NTC table | Bypass Setpoint temperature sensor, °C, measurement, diagnostic |
-| `preheat_setpoint` | 0xA7, NTC table | Preheat Setpoint temperature sensor, °C, measurement, diagnostic |
-| `defrost_setpoint` | 0xA8, NTC table | Defrost Setpoint temperature sensor, °C, measurement, diagnostic |
+| `bypass_setpoint` | 0xAF, NTC table | Bypass Setpoint temperature sensor, °C, diagnostic (no measurement state class) |
+| `preheat_setpoint` | 0xA7, NTC table | Preheat Setpoint temperature sensor, °C, diagnostic (no measurement state class) |
+| `defrost_setpoint` | 0xA8, NTC table | Defrost Setpoint temperature sensor, °C, diagnostic (no measurement state class) |
 | `defrost_hysteresis_raw` | 0xB2, raw decimal | Defrost Hysteresis Raw sensor, no unit, diagnostic |
-| `defrost_hysteresis` | 0xB2, raw / 3.0 | Defrost Hysteresis temperature sensor, °C, measurement, diagnostic |
+| `defrost_hysteresis` | 0xB2, raw / 3.0 | Defrost Hysteresis difference sensor, K, diagnostic (no measurement state class) |
 | `max_fan_speed` | 0xA5, fan bitmask decoded to 1–8 | Maximum Fan Speed sensor, no unit, diagnostic |
 | `filter_warning` | 0xA3 bit 4 | Filter Warning problem binary sensor |
 | `error_relay` | 0x08 bit 2 | Error Relay problem binary sensor |
@@ -68,18 +68,27 @@ about every 60 seconds. The five diagnostic setting registers are queued after
 initialization and through the existing five-minute `QUERY_INTERVAL` path,
 alongside I/O flags and the service counter. All polling, including startup and
 missing-value retries, shares a deduplicated queue: at most one poll is sent per
-loop iteration, with the existing 100 ms delay and at least 100 ms between
+loop iteration, without blocking delays and with at least 100 ms of observed bus idle between
 requests. A matching checksum-valid mainboard reply to this panel releases the
-outstanding request; otherwise it times out after five seconds. Unsupported
+outstanding request; otherwise it times out after two seconds. Unsupported
 optional registers retry on their next normal 60-second/five-minute cycle and
 never block status initialization. Missing base values retry on the existing
 five-second retry path. Overlapping groups share the queue without bursts.
+
+The five-minute I/O reply refreshes retained snapshots. The integration expires a topic after 15 minutes without a valid payload; this is a freshness timeout, not an immediate hardware connectivity indication. Optional keys omitted from a new snapshot are cleared. Unsupported optional registers back off after three missed replies and are probed hourly.
 
 These additions provide no bus setters or MQTT commands. RH/CO₂ registers are
 not normally polled (this installation has no bus RH/CO₂ sensors); existing
 passive decoding is retained. Register 0x6D bit 6 is ignored. The bypass setpoint
 does not command damper position, and maximum fan level enforcement may depend
 on the unit's maximum-limit mode.
+
+If the bus is busy (a poll reply pending, a frame being received, or less than
+100 ms since the last bus activity), a control command is held in a one-command
+slot and sent as soon as the bus is idle, at the latest after 500 ms. A second,
+different command arriving while one is held is rejected. Status writes require
+a previously received status byte and a fresh read after a confirmation timeout.
+Selecting FAN or HEAT combines power-on and heating mode in one status write.
 
 # Configuration
 See guide at https://www.creatingsmarthome.com/?p=105

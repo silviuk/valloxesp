@@ -5,7 +5,6 @@ from homeassistant.helpers.entity import Entity
 
 from homeassistant.components import binary_sensor
 from homeassistant.components.binary_sensor import (
-    DEVICE_CLASSES_SCHEMA,
     BinarySensorEntity,
 )
 
@@ -120,6 +119,10 @@ class ValloxDigitStatusSensor(ValloxDigitBinarySensor):
     def is_on(self):
         """Return true if the binary sensor is on."""
         return self._vallox2mqtt._state
+
+    @property
+    def available(self):
+        return self._vallox2mqtt._state is not None
 
     @property
     def extra_state_attributes(self):
