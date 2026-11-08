@@ -13,6 +13,10 @@
 #define NOT_SET -999
 #define QUERY_INTERVAL 300000 // in ms (5min)
 #define RETRY_INTERVAL 5000 // in ms (5 sec)
+#define LIVE_QUERY_INTERVAL 60000 // in ms (1 min)
+#define REQUEST_GAP 100 // minimum time between poll frames, in ms
+#define REQUEST_QUEUE_LENGTH 24
+#define EXTRA_REGISTER_COUNT 9
 
 // senders and receivers
 #define VX_MSG_MAINBOARD_1 0x11
@@ -92,6 +96,8 @@ class Vallox {
     int getServicePeriod();
     int getServiceCounter();
     int getHeatingTarget();
+    // Read-only registers; NOT_SET until decoded (also supports A3 b4 / 08 b2).
+    int getReadOnlyValue(byte variable);
 
     // get data from cache (settings)
     int getSwitchType(); // (0 = fireplace, 1 = boost, NOT_SET = null)
@@ -129,6 +135,16 @@ class Vallox {
 
     unsigned long lastRequested = 0;
     unsigned long lastRetryLoop = 0;
+    unsigned long lastLiveRequested = 0;
+    bool extraPollingStarted = false;
+    byte requestQueue[REQUEST_QUEUE_LENGTH] = {};
+    byte requestCount = 0;
+    byte pendingRequest = 0;
+    unsigned long requestSentAt = 0;
+    int extraValues[EXTRA_REGISTER_COUNT] = {
+      NOT_SET, NOT_SET, NOT_SET, NOT_SET, NOT_SET,
+      NOT_SET, NOT_SET, NOT_SET, NOT_SET
+    };
 
     // lock status (prevent sending and overriding different values until we have received the last)
     boolean statusMutex = false;
@@ -186,14 +202,14 @@ class Vallox {
       intValue status; // full status message
       intValue variable08; // full 08 message
       intValue flags06; // full flags 06 message
-    } data;
+    } data = {};
 
     // Settings data cache
     struct { 
       booleanValue is_boost_setting; // boost (1) or fireplace (0)
      
       intValue program; // full program (0xAA) message
-    } settings;
+    } settings = {};
     
     PACKET_CALLBACK_SIGNATURE {nullptr};
     STATUS_CHANGED_CALLBACK_SIGNATURE {nullptr};
@@ -229,6 +245,9 @@ class Vallox {
 
     // generic request
     void requestVariable(byte variable);
+    void processRequestQueue();
+    void requestLiveRegisters();
+    void requestSettingRegisters();
 
     // conversions
     static byte fanSpeed2Hex(int fan);

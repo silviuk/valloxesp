@@ -1,7 +1,8 @@
 """Vallox2mqtt binary sensor with attributes"""
 import logging
 
-from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity import EntityCategory
+from homeassistant.components.sensor import SensorEntity
 
 from . import DOMAIN, SIGNAL_STATE_UPDATED
 from homeassistant.helpers.dispatcher import (
@@ -26,9 +27,18 @@ async def async_setup_entry(hass, entry, async_add_devices):
       ValloxDigitAttributedSensor(hass, entry, "Service Counter", 'service_counter', "Months"),
       ValloxDigitAttributedSensor(hass, entry, "Switch Type", 'switch_type', ""),
       ValloxDigitAttributedSensor(hass, entry, "CO2", 'co2', "ppm", "mdi:molecule-co2"),
+      ValloxDigitAttributedSensor(hass, entry, "Fault Code", 'fault_code', None),
+      ValloxDigitAttributedSensor(hass, entry, "Boost Remaining", 'boost_remaining', "min", device_class="duration", state_class="measurement"),
+      ValloxDigitAttributedSensor(hass, entry, "Post Heating Target", 'post_heating_target', UnitOfTemperature.CELSIUS),
+      ValloxDigitAttributedSensor(hass, entry, "Bypass Setpoint", 'bypass_setpoint', UnitOfTemperature.CELSIUS, diagnostic=True),
+      ValloxDigitAttributedSensor(hass, entry, "Preheat Setpoint", 'preheat_setpoint', UnitOfTemperature.CELSIUS, diagnostic=True),
+      ValloxDigitAttributedSensor(hass, entry, "Defrost Setpoint", 'defrost_setpoint', UnitOfTemperature.CELSIUS, diagnostic=True),
+      ValloxDigitAttributedSensor(hass, entry, "Defrost Hysteresis Raw", 'defrost_hysteresis_raw', None, diagnostic=True),
+      ValloxDigitAttributedSensor(hass, entry, "Defrost Hysteresis", 'defrost_hysteresis', "K", diagnostic=True),
+      ValloxDigitAttributedSensor(hass, entry, "Maximum Fan Speed", 'max_fan_speed', None, diagnostic=True),
    ])
 
-class ValloxDigitSensor(Entity):
+class ValloxDigitSensor(SensorEntity):
     """Base implementation of vallox sensor"""
     def __init__(self, hass, entry):
         """Initialize the sensor."""
@@ -61,12 +71,18 @@ class ValloxDigitSensor(Entity):
         )
 
 class ValloxDigitAttributedSensor(ValloxDigitSensor):
-    def __init__(self, hass, entry, fname, attr_name, unit, icon=None):
+    def __init__(self, hass, entry, fname, attr_name, unit, icon=None,
+                 device_class=None, state_class=None, diagnostic=False):
         super().__init__(hass, entry)
         self._attr_name = attr_name
         self._fname = fname
         self._unit = unit
         self._icon = icon
+        is_temperature = unit == UnitOfTemperature.CELSIUS
+        self._attr_device_class = device_class or ("temperature" if is_temperature else None)
+        # Settings are not measurements; keep them out of long-term statistics.
+        self._attr_state_class = state_class or ("measurement" if is_temperature and not diagnostic else None)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC if diagnostic else None
 
     @property
     def unique_id(self):
@@ -79,9 +95,13 @@ class ValloxDigitAttributedSensor(ValloxDigitSensor):
         return f"{self._vallox2mqtt._name} {self._fname}"
 
     @property
-    def state(self):
+    def native_value(self):
         """Return the state of the sensor."""
-        return self._vallox2mqtt._attrs[self._attr_name]
+        return self._vallox2mqtt._attrs.get(self._attr_name)
+
+    @property
+    def native_unit_of_measurement(self):
+        return self._unit
 
     @property
     def available(self) -> bool:
@@ -89,11 +109,6 @@ class ValloxDigitAttributedSensor(ValloxDigitSensor):
           return self._vallox2mqtt._attrs[self._attr_name] is not None
         else:
           return False
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of the sensor."""
-        return self._unit
 
     @property
     def icon(self):

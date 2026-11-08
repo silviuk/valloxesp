@@ -4,6 +4,15 @@
 
 #include "Vallox.h"
 
+// First four are live values; the remaining five are diagnostic settings.
+const byte extraRegisters[EXTRA_REGISTER_COUNT] = {
+  VX_VARIABLE_FAULT_CODE, VX_EXTRA_FUNC_COUNTER,
+  VX_VARIABLE_POST_HEATING_TARGET, VX_VARIABLE_ALARM_FLAGS,
+  VX_VARIABLE_BYPASS_SETPOINT, VX_VARIABLE_PREHEAT_SETPOINT,
+  VX_VARIABLE_DEFROST_SETPOINT, VX_VARIABLE_DEFROST_HYSTERESIS,
+  VX_VARIABLE_MAX_FAN_SPEED
+};
+
 // VX fan speed (1-8) conversion table
 const uint8_t vxFanSpeeds[] = {
   VX_FAN_SPEED_1,
@@ -100,18 +109,50 @@ void Vallox::loop() {
 
   // query for data that can change without notice
   unsigned long now = millis();
+  if (isStatusInitDone() && !extraPollingStarted) {
+    extraPollingStarted = true;
+    lastLiveRequested = now;
+    requestLiveRegisters();
+    requestSettingRegisters();
+  }
+  if (extraPollingStarted && now - lastLiveRequested >= LIVE_QUERY_INTERVAL) {
+    lastLiveRequested = now;
+    requestLiveRegisters();
+  }
   if (now - lastRequested > QUERY_INTERVAL) {
     lastRequested = now;
 
     if (isStatusInitDone()) {
       sendIO08Req();
       sendServiceCounterReq();
+      requestSettingRegisters();
     }
   }
 
   if (now - lastRetryLoop > RETRY_INTERVAL) {
+    lastRetryLoop = now;
     retryLoop();
   }
+  processRequestQueue();
+}
+
+void Vallox::requestLiveRegisters() {
+  for (byte i = 0; i < 4; ++i) requestVariable(extraRegisters[i]);
+}
+
+void Vallox::requestSettingRegisters() {
+  for (byte i = 4; i < EXTRA_REGISTER_COUNT; ++i) requestVariable(extraRegisters[i]);
+}
+
+int Vallox::getReadOnlyValue(byte variable) {
+  if (variable == VX_VARIABLE_STATUS)
+    return data.status.lastReceived ? (int)data.is_filter.value : NOT_SET;
+  if (variable == VX_VARIABLE_IO_08)
+    return data.variable08.lastReceived ? (int)data.is_error.value : NOT_SET;
+  for (byte i = 0; i < EXTRA_REGISTER_COUNT; ++i) {
+    if (extraRegisters[i] == variable) return extraValues[i];
+  }
+  return NOT_SET;
 }
 
 // setters
@@ -467,6 +508,26 @@ void Vallox::setVariable(byte variable, byte value, byte target) {
 }
 
 void Vallox::requestVariable(byte variable) {
+  // Deduplicate requests, including those already awaiting a reply.
+  if (pendingRequest == variable) return;
+  for (byte i = 0; i < requestCount; ++i) {
+    if (requestQueue[i] == variable) return;
+  }
+  if (requestCount < REQUEST_QUEUE_LENGTH) requestQueue[requestCount++] = variable;
+}
+
+void Vallox::processRequestQueue() {
+  unsigned long now = millis();
+  // A missing response releases the slot after the existing retry interval.
+  // Optional registers retry on their normal 60 s / 5 min schedule.
+  if (pendingRequest && now - requestSentAt < RETRY_INTERVAL) return;
+  pendingRequest = 0;
+  if (!requestCount || now - requestSentAt < REQUEST_GAP) return;
+  byte variable = requestQueue[0];
+  for (byte i = 1; i < requestCount; ++i) requestQueue[i - 1] = requestQueue[i];
+  --requestCount;
+  pendingRequest = variable;
+  requestSentAt = now;
   byte message[VX_MSG_LENGTH];
   message[0] = VX_MSG_DOMAIN;
   message[1] = VX_MSG_THIS_PANEL;
@@ -533,6 +594,30 @@ void Vallox::decodeMessage(const byte message[]) {
   // Check message checksum
   if (!validateCheckSum(message)) {
     return ;// Message invalid
+  }
+
+  // Only a checksum-valid mainboard response addressed to this poller
+  // completes an outstanding poll. Other bus traffic still updates the cache.
+  if (message[1] == VX_MSG_MAINBOARD_1 &&
+      message[2] == VX_MSG_THIS_PANEL && variable == pendingRequest) {
+    pendingRequest = 0;
+  }
+
+  for (byte i = 0; i < EXTRA_REGISTER_COUNT; ++i) {
+    if (variable != extraRegisters[i]) continue;
+    int decoded = value;
+    if (variable == VX_VARIABLE_POST_HEATING_TARGET ||
+        variable == VX_VARIABLE_BYPASS_SETPOINT ||
+        variable == VX_VARIABLE_PREHEAT_SETPOINT ||
+        variable == VX_VARIABLE_DEFROST_SETPOINT) {
+      decoded = ntc2Cel(value);
+    } else if (variable == VX_VARIABLE_MAX_FAN_SPEED) {
+      decoded = hex2FanSpeed(value);
+    } else if (variable == VX_VARIABLE_ALARM_FLAGS) {
+      decoded = (value & VX_CELL_FREEZE_ALARM) != 0;
+    }
+    checkStatusChange(&extraValues[i], decoded);
+    return;
   }
 
   // Temperature (status object)
@@ -723,8 +808,8 @@ void Vallox::checkValueChange(int* oldValue, int newValue) {
 
 
 int Vallox::ntc2Cel(byte ntc) {
-  int i = (int)ntc;
-  return vxTemps[i];
+  const size_t i = ntc;
+  return i < sizeof(vxTemps) / sizeof(vxTemps[0]) ? vxTemps[i] : NOT_SET;
 }
 
 byte Vallox::cel2Ntc(int cel) {
