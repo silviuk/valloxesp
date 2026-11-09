@@ -5,7 +5,6 @@ from homeassistant.helpers.entity import Entity
 
 from homeassistant.components import binary_sensor
 from homeassistant.components.binary_sensor import (
-    DEVICE_CLASSES_SCHEMA,
     BinarySensorEntity,
 )
 
@@ -28,6 +27,9 @@ async def async_setup_entry(hass, entry, async_add_devices):
       ValloxDigitAttributedBinarySensor(hass, entry, "Summer Mode", 'summer_mode'),
       ValloxDigitAttributedBinarySensor(hass, entry, "Front Heating", 'front_heating'),
       ValloxDigitAttributedBinarySensor(hass, entry, "Service Needed", 'service_needed', 'problem'),
+      ValloxDigitAttributedBinarySensor(hass, entry, "Filter Warning", 'filter_warning', 'problem'),
+      ValloxDigitAttributedBinarySensor(hass, entry, "Error Relay", 'error_relay', 'problem'),
+      ValloxDigitAttributedBinarySensor(hass, entry, "Cell Freeze Alarm", 'cell_freeze_alarm', 'problem'),
       ValloxDigitAttributedBinarySensor(hass, entry, "Post Heating", 'heating')
    ])
 
@@ -83,7 +85,7 @@ class ValloxDigitAttributedBinarySensor(ValloxDigitBinarySensor):
     @property
     def is_on(self):
         """Return true if the binary sensor is on."""
-        return self._vallox2mqtt._attrs[self._attr_name]
+        return self._vallox2mqtt._attrs.get(self._attr_name)
 
     @property
     def available(self) -> bool:
@@ -117,6 +119,10 @@ class ValloxDigitStatusSensor(ValloxDigitBinarySensor):
     def is_on(self):
         """Return true if the binary sensor is on."""
         return self._vallox2mqtt._state
+
+    @property
+    def available(self):
+        return self._vallox2mqtt._state is not None
 
     @property
     def extra_state_attributes(self):

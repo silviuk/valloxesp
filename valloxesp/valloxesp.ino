@@ -19,7 +19,7 @@
 #define JSON_BUFFER_LENGTH 2048
 #define DEBUG false // default value for debug
 
-#define VALLOXESP_VERSION "1.0.0" // this version
+#define VALLOXESP_VERSION "1.1.0" // this version
 
 // Callbacks
 void mqttCallback(char* topic, byte* payload, unsigned int payloadLength);
@@ -88,11 +88,13 @@ void wifiConnect() {
 
 void mqttConnect() {
   if (!!!client.connected()) {
-    int count = 20;
-    while (count-- > 0 && !!!client.connect(client_id, mqtt_username, mqtt_password)) {
-      delay(500);
-    }
-
+    static unsigned long lastAttempt = 0;
+    static bool attempted = false;
+    if (attempted && millis() - lastAttempt < 5000) return;
+    attempted = true;
+    lastAttempt = millis();
+    if (WiFi.status() != WL_CONNECTED || !client.connect(client_id, mqtt_username, mqtt_password)) return;
+    publishAllData();
     if (client.subscribe(vallox_set_topic)) {
       // OK
       if (debug) {
@@ -114,13 +116,13 @@ void publishAllData() {
 
 void mqttCallback(char* topic, byte * payload, unsigned int length) {
   if (strcmp (vallox_set_topic, topic) == 0) {
-    handleUpdate(payload);
+    handleUpdate(payload, length);
   }
 }
 
-void handleUpdate(byte * payload) {
+void handleUpdate(byte * payload, unsigned int length) {
   DynamicJsonDocument d(JSON_BUFFER_LENGTH);
-  DeserializationError error = deserializeJson(d, (char*)payload);
+  DeserializationError error = deserializeJson(d, (const char*)payload, length);
 
   if (error) {
     if (debug) {
@@ -140,15 +142,9 @@ void handleUpdate(byte * payload) {
 
     if (m == "FAN") {
       // Fan only
-      if (!vx.isOn()) {
-        vx.setOn();
-      }
       vx.setHeatingModeOff();
     } else if (m == "HEAT") {
       // Set heat mode
-      if (!vx.isOn()) {
-        vx.setOn();
-      }
       vx.setHeatingModeOn();
     }
    
@@ -158,25 +154,26 @@ void handleUpdate(byte * payload) {
   // If you wish to have such feature, feel free to implement :-)
 
   // Speed
-  if (d.containsKey("speed")) {
+  if (d["speed"].is<int>()) {
     int speed = d["speed"];
     vx.setFanSpeed(speed);
   }
 
   // Heat target
-  if (d.containsKey("heat_target")) {
+  if (d["heat_target"].is<float>() && d["heat_target"].as<float>() >= 10 && d["heat_target"].as<float>() <= 27) {
     int ht = d["heat_target"];
     vx.setHeatingTarget(ht);
   }
 
   // Activate boost/fireplace
-  if (d.containsKey("activate_switch")) {
+  if (d["activate_switch"].is<bool>() && d["activate_switch"].as<bool>()) {
     vx.setSwitchOn();
   }
 }
 
 // State
 void publishState() {
+  if (!vx.isInitOk()) return;
   DynamicJsonDocument root(JSON_BUFFER_LENGTH);
 
   // Mode
@@ -190,7 +187,10 @@ void publishState() {
   root["service_needed"] = vx.isServiceNeeded();
   
   root["summer_mode"] = vx.isSummerMode();
-  // root["error_relay"] = vx.isErrorRelay();
+  if (vx.getReadOnlyValue(VX_VARIABLE_IO_08) != NOT_SET)
+    root["error_relay"] = (bool)vx.getReadOnlyValue(VX_VARIABLE_IO_08);
+  if (vx.getReadOnlyValue(VX_VARIABLE_STATUS) != NOT_SET)
+    root["filter_warning"] = (bool)vx.getReadOnlyValue(VX_VARIABLE_STATUS);
   root["motor_in"] = !vx.isMotorIn();
   root["motor_out"] = !vx.isMotorOut();
   root["front_heating"] = vx.isFrontHeating();
@@ -201,6 +201,26 @@ void publishState() {
   root["service_period"] = vx.getServicePeriod();
   root["service_counter"] = vx.getServiceCounter();
   root["heat_target"] = vx.getHeatingTarget();  
+
+  // Additional read-only registers: omit values not received/decoded yet.
+  const byte registers[] = {
+    VX_VARIABLE_FAULT_CODE, VX_EXTRA_FUNC_COUNTER, VX_VARIABLE_POST_HEATING_TARGET,
+    VX_VARIABLE_BYPASS_SETPOINT, VX_VARIABLE_PREHEAT_SETPOINT,
+    VX_VARIABLE_DEFROST_SETPOINT, VX_VARIABLE_DEFROST_HYSTERESIS,
+    VX_VARIABLE_MAX_FAN_SPEED
+  };
+  const char* keys[] = {
+    "fault_code", "boost_remaining", "post_heating_target", "bypass_setpoint",
+    "preheat_setpoint", "defrost_setpoint", "defrost_hysteresis_raw", "max_fan_speed"
+  };
+  for (size_t i = 0; i < sizeof(registers) / sizeof(registers[0]); ++i) {
+    int value = vx.getReadOnlyValue(registers[i]);
+    if (value != NOT_SET) root[keys[i]] = value;
+  }
+  int hysteresis = vx.getReadOnlyValue(VX_VARIABLE_DEFROST_HYSTERESIS);
+  if (hysteresis != NOT_SET) root["defrost_hysteresis"] = hysteresis / 3.0;
+  int cellFreeze = vx.getReadOnlyValue(VX_VARIABLE_ALARM_FLAGS);
+  if (cellFreeze != NOT_SET) root["cell_freeze_alarm"] = (bool)cellFreeze;
 
   root["switch_active"] = vx.isSwitchActive();
 
@@ -213,7 +233,7 @@ void publishState() {
   
   String mqttOutput;
   serializeJson(root, mqttOutput);
-  client.beginPublish(vallox_state_topic, mqttOutput.length(), true);
+  if (root.overflowed() || !client.beginPublish(vallox_state_topic, mqttOutput.length(), true)) return;
   client.print(mqttOutput);
   client.endPublish();
 }
@@ -221,10 +241,11 @@ void publishState() {
 void publishTemperatures() {
   DynamicJsonDocument root(JSON_BUFFER_LENGTH);
 
-  root["temp_outside"] = vx.getOutsideTemp();
-  root["temp_inside"] = vx.getInsideTemp();
-  root["temp_incoming"] = vx.getIncomingTemp();
-  root["temp_exhaust"] = vx.getExhaustTemp();
+  // Omit temperatures that have not been read yet (no -999 placeholders).
+  if (vx.getOutsideTemp() != NOT_SET) root["temp_outside"] = vx.getOutsideTemp();
+  if (vx.getInsideTemp() != NOT_SET) root["temp_inside"] = vx.getInsideTemp();
+  if (vx.getIncomingTemp() != NOT_SET) root["temp_incoming"] = vx.getIncomingTemp();
+  if (vx.getExhaustTemp() != NOT_SET) root["temp_exhaust"] = vx.getExhaustTemp();
 
   // Publish only if RH values are something else than not set
   if(vx.getRh1() != NOT_SET) {
@@ -241,7 +262,7 @@ void publishTemperatures() {
 
   String mqttOutput;
   serializeJson(root, mqttOutput);
-  client.beginPublish(vallox_temp_topic, mqttOutput.length(), true);
+  if (root.overflowed() || !client.beginPublish(vallox_temp_topic, mqttOutput.length(), true)) return;
   client.print(mqttOutput);
   client.endPublish();
 }
@@ -255,8 +276,16 @@ void temperatureChanged() {
 }
 
 void debugPrint(String message) {
+  if (message.startsWith("CMD_RESULT ")) {
+    // Always publish command outcomes (sent / failed) for HA/logging.
+    DynamicJsonDocument root(192);
+    root["message"] = message;
+    String out; serializeJson(root, out);
+    client.beginPublish(vallox_command_result_topic, out.length(), false);
+    client.print(out);
+    client.endPublish();
+  }
   if (debug) {
-    // publish to debug topic
     client.publish(vallox_debug_topic, message.c_str());
   }
 }
