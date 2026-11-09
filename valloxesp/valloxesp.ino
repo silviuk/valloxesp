@@ -276,8 +276,16 @@ void temperatureChanged() {
 }
 
 void debugPrint(String message) {
+  if (message.startsWith("CMD_RESULT ")) {
+    // Always publish command outcomes (sent / failed) for HA/logging.
+    DynamicJsonDocument root(192);
+    root["message"] = message;
+    String out; serializeJson(root, out);
+    client.beginPublish(vallox_command_result_topic, out.length(), false);
+    client.print(out);
+    client.endPublish();
+  }
   if (debug) {
-    // publish to debug topic
     client.publish(vallox_debug_topic, message.c_str());
   }
 }

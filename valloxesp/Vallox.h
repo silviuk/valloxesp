@@ -19,10 +19,33 @@
 #define EXTRA_REGISTER_COUNT 9
 #define REQUEST_TIMEOUT 2000 // ms to wait for a poll reply before freeing the slot
 #define STATUS_LOCK_TIMEOUT 5000 // allows one in-flight poll plus the status poll
-#define WRITE_REPLY_WAIT_MS 300 // wait this long for an outstanding poll reply before writing
-#define WRITE_DEFER_MAX_MS 500 // send a deferred command at the latest after this
+#define WRITE_REPLY_WAIT_MS 300 // treat an outstanding poll as blocking writes for this long
+#define WRITE_HOLD_MS 2500 // max wait for bus idle before failing a queued write
+#define WRITE_QUEUE_LENGTH 6
 #define EXTRA_MAX_MISSES 3 // consecutive unanswered polls before backing off
 #define EXTRA_BACKOFF_INTERVAL 3600000UL // probe unanswered registers hourly
+
+// Cache fields updated only after a write is actually transmitted
+enum WriteKind : byte {
+  WK_NONE = 0,
+  WK_FAN_SPEED,
+  WK_DEFAULT_FAN_SPEED,
+  WK_HEATING_TARGET,
+  WK_SERVICE_PERIOD,
+  WK_SERVICE_COUNTER,
+  WK_STATUS,
+  WK_SWITCH_ON
+};
+
+struct PendingWrite {
+  bool active;
+  byte variable;
+  byte value;
+  byte target;
+  byte kind;
+  int decoded;
+  unsigned long queuedAt; // original enqueue time; kept on coalesce
+};
 
 // senders and receivers
 #define VX_MSG_MAINBOARD_1 0x11
@@ -151,9 +174,8 @@ class Vallox {
     unsigned long requestSentAt = 0;
     unsigned long statusMutexAt = 0;
     unsigned long lastBusActivity = 0;
-    bool deferredWrite = false;
-    byte deferredVariable = 0, deferredValue = 0, deferredTarget = 0;
-    unsigned long deferredAt = 0;
+    PendingWrite writeQueue[WRITE_QUEUE_LENGTH] = {};
+    byte writeCount = 0;
     byte receiveBuffer[VX_MSG_LENGTH] = {};
     byte receiveCount = 0;
     byte extraMisses[EXTRA_REGISTER_COUNT] = {};
@@ -239,9 +261,13 @@ class Vallox {
     // generic setter
     bool setVariable(byte variable, byte value, byte target);
     bool setVariable(byte variable, byte value);
+    bool scheduleWrite(byte variable, byte value, byte target, byte kind, int decoded);
     void transmitVariable(byte variable, byte value, byte target);
+    void applyWriteCache(const PendingWrite &cmd);
+    void failWrite(const PendingWrite &cmd, const char *reason);
+    void publishCommandResult(const char *result, byte variable, const char *reason);
     boolean isBusBusy();
-    void processDeferredWrite();
+    void processWriteQueue();
   
     // requests
     void sendStatusReq();

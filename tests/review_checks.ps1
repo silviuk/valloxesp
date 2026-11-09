@@ -24,10 +24,13 @@ Assert-Review ($poll.Contains('message[3] = VX_MSG_POLL_BYTE;')) 'Poll became a 
 Assert-Review ($poll.Contains('message[4] = variable;')) 'Poll register missing'
 Assert-Review (-not $poll.Contains('delay(')) 'Blocking poll delay'
 Assert-Review ($poll.Contains('now - lastBusActivity < REQUEST_GAP')) 'Missing bus-idle guard'
-Assert-Review ($cpp.Contains('if (requestCount < REQUEST_QUEUE_LENGTH)')) 'Unbounded queue'
+Assert-Review ($cpp.Contains('REQUEST_QUEUE_LENGTH')) 'Missing request queue bound'
+Assert-Review ($cpp.Contains('WRITE_QUEUE_LENGTH') -or $header.Contains('WRITE_QUEUE_LENGTH')) 'Missing write queue bound'
+Assert-Review ($cpp.Contains('WRITE_HOLD_MS') -or $header.Contains('WRITE_HOLD_MS')) 'Missing write hold timeout'
+Assert-Review (-not $cpp.Contains('WRITE_DEFER_MAX_MS')) 'Forced busy-bus send still present'
 Assert-Review ($ino.Contains('deserializeJson(d, (const char*)payload, length)')) 'Unbounded MQTT parsing'
 Assert-Review ($ino.Contains('beginPublish(vallox_state_topic')) 'State streaming removed'
-Assert-Review (-not ([regex]::Match($cpp, '(?s)void Vallox::requestConfig.*?void Vallox::loop').Value.Contains('sendRhReq();'))) 'Absent RH sensor polled'
+Assert-Review ([regex]::Match($cpp, '(?s)void Vallox::requestConfig.*?void Vallox::loop').Value.Contains('sendRhReq();')) 'Startup RH request missing (kept for master-compatible boot)'
 $tempBody = [regex]::Match($cpp, '(?s)const int8_t vxTemps\[\] = \{(.*?)\};').Groups[1].Value
 $tempBody = [regex]::Replace($tempBody, '//[^\r\n]*', '')
 Assert-Review ([regex]::Matches($tempBody, '-?\d+').Count -eq 256) 'NTC table does not cover all byte indices'

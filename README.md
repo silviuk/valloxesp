@@ -78,17 +78,21 @@ five-second retry path. Overlapping groups share the queue without bursts.
 The five-minute I/O reply refreshes retained snapshots. The integration expires a topic after 15 minutes without a valid payload; this is a freshness timeout, not an immediate hardware connectivity indication. Optional keys omitted from a new snapshot are cleared. Unsupported optional registers back off after three missed replies and are probed hourly.
 
 These additions provide no bus setters or MQTT commands. RH/CO₂ registers are
-not normally polled (this installation has no bus RH/CO₂ sensors); existing
-passive decoding is retained. Register 0x6D bit 6 is ignored. The bypass setpoint
+not periodically polled (this installation has no bus RH/CO₂ sensors); existing
+passive decoding is retained. Startup still issues the historical one-shot RH1
+request for master-compatible boot behaviour; it is not retried if unanswered. Register 0x6D bit 6 is ignored. The bypass setpoint
 does not command damper position, and maximum fan level enforcement may depend
 on the unit's maximum-limit mode.
 
-If the bus is busy (a poll reply pending, a frame being received, or less than
-100 ms since the last bus activity), a control command is held in a one-command
-slot and sent as soon as the bus is idle, at the latest after 500 ms. A second,
-different command arriving while one is held is rejected. Status writes require
-a previously received status byte and a fresh read after a confirmation timeout.
-Selecting FAN or HEAT combines power-on and heating mode in one status write.
+Control writes use a small bounded queue (coalesce by register: newest value
+wins, original deadline kept; FIFO across different registers). A write is only
+transmitted when the bus is idle; it waits up to 2.5 s, then fails with a
+`vallox/command_result` message (`CMD_RESULT failed …`). Values are published to
+MQTT only after the frame is actually sent. Boost/fireplace activation is not
+re-queued while already active, and repeated activates coalesce to one pulse.
+Status writes require a previously received status byte and a fresh read after
+confirmation (or timeout). Selecting FAN or HEAT combines power-on and heating
+mode in one status write.
 
 # Configuration
 See guide at https://www.creatingsmarthome.com/?p=105
