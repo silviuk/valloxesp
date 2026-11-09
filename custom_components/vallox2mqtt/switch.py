@@ -2,7 +2,6 @@
 from homeassistant.helpers.entity import Entity
 from homeassistant.components import switch
 from homeassistant.components.switch import (
-    DEVICE_CLASSES_SCHEMA,
     SwitchEntity,
 )
 
@@ -67,6 +66,10 @@ class ValloxDigitSwitch(SwitchEntity):
     def is_on(self):
         """Return true if boost/fireplace is on."""
         return self._vallox2mqtt._switch_active
+
+    @property
+    def available(self):
+        return self._vallox2mqtt._switch_active is not None
 
     @property
     def device_info(self):
