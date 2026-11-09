@@ -134,7 +134,8 @@ void Vallox::loop() {
 
   // Fallback if no status reply arrives: release the lock after a short
   // timeout instead of waiting for the 5 s retry loop.
-  if (statusMutex && now - statusMutexAt > STATUS_LOCK_TIMEOUT) {
+  if (statusMutex && statusAwaitingConfirm && now - statusMutexAt > STATUS_LOCK_TIMEOUT) {
+    statusAwaitingConfirm = false;
     statusMutex = false;
     data.status.lastReceived = 0; // Require a fresh read before another RMW write.
     sendStatusReq();
@@ -250,13 +251,12 @@ void Vallox::setHeatingTarget(int cel) {
 }
 
 void Vallox::setSwitchOn() {
-  if (data.is_switch_active.lastReceived && data.is_switch_active.value) {
-    if (debugPrintCallback) debugPrintCallback("Boost/fireplace already active");
-    return; // never re-activate while already on
+  if (switchActivationPending ||
+      (data.is_switch_active.lastReceived && data.is_switch_active.value)) {
+    if (debugPrintCallback) debugPrintCallback("Boost/fireplace already active or pending");
+    return;
   }
   if (!data.flags06.lastReceived) { sendFlags06Req(); return; }
-  // Coalesce by variable: a second activate while one is queued replaces the value,
-  // not a second pulse. Do not schedule if an identical activate is already queued.
   scheduleWrite(VX_VARIABLE_FLAGS_06,
                 data.flags06.value | VX_06_FIREPLACE_FLAG_ACTIVATE,
                 VX_MSG_MAINBOARDS, WK_SWITCH_ON, 1);
@@ -494,10 +494,12 @@ void Vallox::publishCommandResult(const char *result, byte variable, const char 
 void Vallox::failWrite(const PendingWrite &cmd, const char *reason) {
   publishCommandResult("failed", cmd.variable, reason);
   if (cmd.kind == WK_STATUS) {
+    statusAwaitingConfirm = false;
     statusMutex = false;
     data.status.lastReceived = 0;
     sendStatusReq();
   }
+  if (cmd.kind == WK_SWITCH_ON) switchActivationPending = false;
 }
 
 void Vallox::applyWriteCache(const PendingWrite &cmd) {
@@ -512,10 +514,14 @@ void Vallox::applyWriteCache(const PendingWrite &cmd) {
       data.is_heating_mode.value = (cmd.decoded & VX_STATUS_FLAG_HEATING_MODE) != 0;
       data.is_rh_mode.value = (cmd.decoded & VX_STATUS_FLAG_RH) != 0;
       data.status.value = (byte)cmd.decoded;
+      statusAwaitingConfirm = true;
+      statusMutex = true;
+      statusMutexAt = millis();
       requestVariable(VX_VARIABLE_STATUS);
       break;
     case WK_SWITCH_ON:
-      break; // wait for flags06 broadcast / poll for active bit
+      switchActivationPending = true;
+      break; // wait for flags06; block further activates until then
     default: break;
   }
   if (cmd.kind != WK_NONE && cmd.kind != WK_SWITCH_ON && statusChangedCallback)
@@ -580,6 +586,12 @@ void Vallox::processWriteQueue() {
   PendingWrite cmd = writeQueue[0];
   for (byte i = 1; i < writeCount; ++i) writeQueue[i - 1] = writeQueue[i];
   --writeCount;
+  if (cmd.kind == WK_SWITCH_ON &&
+      data.is_switch_active.lastReceived && data.is_switch_active.value) {
+    switchActivationPending = false;
+    publishCommandResult("failed", cmd.variable, "already_active");
+    return;
+  }
   transmitVariable(cmd.variable, cmd.value, cmd.target);
   applyWriteCache(cmd);
   publishCommandResult("sent", cmd.variable, "queued");
@@ -877,7 +889,16 @@ void Vallox::decodeFlags06(byte flags06) {
   data.flags06.value = flags06;
   data.flags06.lastReceived = now ? now : 1;
 
-  checkStatusChange(&(data.is_switch_active.value), (flags06 & VX_06_FIREPLACE_FLAG_IS_ACTIVE) != 0x00);
+  bool active = (flags06 & VX_06_FIREPLACE_FLAG_IS_ACTIVE) != 0x00;
+  checkStatusChange(&(data.is_switch_active.value), active);
+  if (active) {
+    switchActivationPending = false;
+    for (byte i = 0; i < writeCount; ++i) {
+      if (writeQueue[i].kind != WK_SWITCH_ON) continue;
+      for (byte j = i + 1; j < writeCount; ++j) writeQueue[j - 1] = writeQueue[j];
+      --writeCount; --i;
+    }
+  }
 }
 
 void Vallox::decodeProgram(byte program) {
@@ -920,7 +941,10 @@ void Vallox::decodeStatus(byte status) {
   checkStatusChange(&(data.is_fault.value), (status & VX_STATUS_FLAG_FAULT) != 0x00);
   checkStatusChange(&(data.is_service.value), (status & VX_STATUS_FLAG_SERVICE) != 0x00);
 
-  statusMutex = false; // Clear the status mutex, allow to continue
+  if (statusAwaitingConfirm) {
+    statusAwaitingConfirm = false;
+    statusMutex = false;
+  }
 }
 
 //

@@ -8,6 +8,7 @@ from time import monotonic
 
 from homeassistant.components.mqtt.const import CONF_STATE_TOPIC, CONF_COMMAND_TOPIC
 from homeassistant.const import CONF_NAME
+from homeassistant.core import callback
 from .const import DOMAIN, PLATFORMS
 import homeassistant.components.mqtt as mqtt
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -140,6 +141,7 @@ class Vallox2mqtt():
         # Freshness expiry: the firmware republishes both snapshots at least
         # every five minutes (decodeVariable08 forces dirty flags on the I/O poll),
         # so 15 minutes without a valid payload means the unit or link is gone.
+        @callback
         def expire_stale(now):
             changed = False
             for topic, received in list(self._received_at.items()):

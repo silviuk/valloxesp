@@ -187,6 +187,8 @@ class Vallox {
 
     // lock status (prevent sending and overriding different values until we have received the last)
     boolean statusMutex = false;
+    boolean statusAwaitingConfirm = false;
+    boolean switchActivationPending = false;
 
     // lock program variable (prevent sending and overriding different values until we have received the last)
     boolean programMutex = false;
