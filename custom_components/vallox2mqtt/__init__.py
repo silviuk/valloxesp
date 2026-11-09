@@ -3,12 +3,16 @@
 import logging
 import json
 import asyncio
+from datetime import timedelta
+from time import monotonic
 
 from homeassistant.components.mqtt.const import CONF_STATE_TOPIC, CONF_COMMAND_TOPIC
 from homeassistant.const import CONF_NAME
+from homeassistant.core import callback
 from .const import DOMAIN, PLATFORMS
 import homeassistant.components.mqtt as mqtt
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_time_interval
 
 CONF_TEMP_STATE_TOPIC = "temperature_state_topic"
 SIGNAL_STATE_UPDATED = f"{DOMAIN}.updated"
@@ -69,6 +73,7 @@ class Vallox2mqtt():
         self._command_topic = config.get(CONF_COMMAND_TOPIC,'')
         self._subscriptions = []
         self._topic_keys = {}
+        self._received_at = {}
         self._qos = 0 # TODO: Take these from config
         self._retain = False
 
@@ -124,6 +129,7 @@ class Vallox2mqtt():
             for key in self._topic_keys.get(topic, set()):
                 self._attrs.pop(key, None)
             self._topic_keys[topic] = set(parsed)
+            self._received_at[topic] = monotonic()
             self._attrs.update(parsed)
             async_dispatcher_send(self._hass, SIGNAL_STATE_UPDATED)
 
@@ -131,6 +137,31 @@ class Vallox2mqtt():
             self._subscriptions.append(
                 await mqtt.async_subscribe(self._hass, topic, message_received, self._qos)
             )
+
+        # Freshness expiry: the firmware republishes both snapshots at least
+        # every five minutes (decodeVariable08 forces dirty flags on the I/O poll),
+        # so 15 minutes without a valid payload means the unit or link is gone.
+        @callback
+        def expire_stale(now):
+            changed = False
+            for topic, received in list(self._received_at.items()):
+                if monotonic() - received < 900:
+                    continue
+                del self._received_at[topic]
+                for key in self._topic_keys.pop(topic, set()):
+                    self._attrs.pop(key, None)
+                if topic == self._state_topic:
+                    self._state = self._switch_active = None
+                    self._hvac_mode = None
+                else:
+                    self._current_temperature = None
+                changed = True
+            if changed:
+                async_dispatcher_send(self._hass, SIGNAL_STATE_UPDATED)
+
+        self._subscriptions.append(
+            async_track_time_interval(self._hass, expire_stale, timedelta(minutes=1))
+        )
 
     async def _publish_temperature(self):
         """Set new target temperature."""
